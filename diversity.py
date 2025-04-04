@@ -92,6 +92,35 @@ def getfusedvalue(graphs, alpha):
     non_zeros = np.count_nonzero(output)
     print(f"Number of non-zero distances: {non_zeros} out of {len(graphs)*len(graphs)} pairs")
     return output
+   
+# I want my calculated data to be save in a .csv file 
+def save_to_csv(filename, ks_stat, ks_pvalue, gmm_best_n, gmm_bic, weights, means, covars, converged_status, log_likelihood_score):
+    file_exists = os.path.isfile(filename)
+
+    weight_str = ', '.join([f"{w:.3f}" for w in weights])
+    mean_str = ', '.join([f"{m:.3f}" for m in means])
+    covar_str = ', '.join([f"{c:.3f}" for c in covars])
+    
+    data = [
+        ["KS_Stat", f"{ks_stat:.4f}"],
+        ["KS_p_value", f"{ks_pvalue:.4e}"],
+        ["GMM_BestN", gmm_best_n],
+        ["GMM_BIC", f"{gmm_bic:.4f}"],
+        ["GMM_Weights", weight_str],
+        ["GMM_Means", mean_str],
+        ["GMM_Covars", covar_str],
+        ["Converged_Status", converged_status],
+        ["Log_Likelihood_Score", f"{log_likelihood_score:.4f}"]
+    ]
+    
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(["Key", "Value"])
+
+        writer.writerows(data)
+
 
 def main():
     with open('/Users/y.h.jollin/FGW/MPtrj_1K_structures.json', 'r') as f:
@@ -295,6 +324,20 @@ def main():
         plt.close()
         print("GMM is fitted and saevd in .png format")
 
+    # Save GMM results to CSV
+    save_to_csv(
+        filename='gmm_analysis_results.csv',
+        ks_stat=D,
+        ks_pvalue=p_value,
+        gmm_best_n=best_n,
+        gmm_bic=lowest_bic,
+        weights=weights,
+        means=means,
+        covars=covars,
+        converged_status=converged_status,
+        log_likelihood_score=log_likelihood_score
+    )
+   
     # Get t-SNE
     from sklearn.manifold import TSNE
     tsne = TSNE(
