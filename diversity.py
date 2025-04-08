@@ -1,16 +1,18 @@
+# ----- Imports & Paramaters -----
 
-#Importing modules
-import json #for reading json files
+import json 
 import pandas as pd
 import numpy as np
 import copy
 import openpyxl
+import os
 import csv
 from sklearn.metrics import log_loss
 import ot
 from tqdm.notebook import tqdm
 from scipy.stats import norm
 from scipy.stats import kstest
+import matplotlib.pyplot as plt
 
 from pymatgen.io.jarvis import JarvisAtomsAdaptor
 from jarvis.core.atoms import Atoms
@@ -19,20 +21,22 @@ from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis.local_env import CrystalNN
 
 from data_loader import load_local_data, histog, build_noisy_circular_graph
-import networkx as nx #Python package for studying complex networks; good for graphing
+import networkx as nx
 from graph import graph_colors, draw_rel, draw_transp, Graph, wl_labeling
 from ot_distances import Fused_Gromov_Wasserstein_distance, Wasserstein_distance
 from tqdm import tqdm 
-
 from scipy.sparse.csgraph import shortest_path
-
 
 print("Modules imported; the program is ready to run.")
 
-   
-#Defining necessary function
 
-#Function to generate feature vectors
+# ======================================
+#          Defining Functions 
+# ======================================
+
+# Convert a Graph() object into a dictionary with node and edge info. 
+# If label='petti', it uses Pettifor numbers from 'petti_num'
+
 def graph2dict(G, label='skip'):
     atom_names = [site.label for site in G.structure.sites]
 
@@ -53,7 +57,9 @@ def graph2dict(G, label='skip'):
 
     return graphDict
 
-#Function to generate graphical representations in a chosen feature space
+# Reconstruct a Graph() object from a dictionary representation.
+# To generate graphical representations in a chosen feature space.
+
 def dict2graph(D, label='skip'):
     g = Graph()
     node_dict = {}
@@ -68,7 +74,9 @@ def dict2graph(D, label='skip'):
         g.add_edge(edge)
     return g
 
-#Function to generate fused GW matrix
+# Generate FGW distance matrix among a list of graph() objects. 
+# Alpha is the weighting for FGW
+
 def getfusedvalue(graphs, alpha): 
     output = np.zeros([len(graphs),len(graphs)])
     if len(graphs) > 0:
@@ -92,42 +100,55 @@ def getfusedvalue(graphs, alpha):
     non_zeros = np.count_nonzero(output)
     print(f"Number of non-zero distances: {non_zeros} out of {len(graphs)*len(graphs)} pairs")
     return output
-   
-# I want my calculated data to be save in a .csv file 
-def save_to_csv(filename, ks_stat, ks_pvalue, gmm_best_n, gmm_bic, weights, means, covars, converged_status, log_likelihood_score):
-    file_exists = os.path.isfile(filename)
 
-    weight_str = ', '.join([f"{w:.3f}" for w in weights])
-    mean_str = ', '.join([f"{m:.3f}" for m in means])
-    covar_str = ', '.join([f"{c:.3f}" for c in covars])
-    
-    data = [
-        ["KS_Stat", f"{ks_stat:.4f}"],
-        ["KS_p_value", f"{ks_pvalue:.4e}"],
-        ["GMM_BestN", gmm_best_n],
-        ["GMM_BIC", f"{gmm_bic:.4f}"],
-        ["GMM_Weights", weight_str],
-        ["GMM_Means", mean_str],
-        ["GMM_Covars", covar_str],
-        ["Converged_Status", converged_status],
-        ["Log_Likelihood_Score", f"{log_likelihood_score:.4f}"]
-    ]
-    
-    with open(filename, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
+# Save all the info in an Excel file
 
-        if not file_exists:
-            writer.writerow(["Key", "Value"])
+def save_side_by_side_excel(filename, run_name, metrics_dict):
+    new_df = pd.DataFrame(list(metrics_dict.items()), columns=['Key', run_name])
+    new_df.set_index('Key', inplace=True)
 
-        writer.writerows(data)
+    if not os.path.isfile(filename):
+        with pd.ExcelWriter(filename, mode='w', engine='openpyxl') as writer:
+            new_df.to_excel(writer, sheet_name='GMM_Analysis_Results')
+    else: 
+        old_df = pd.read_excel(filename, sheet_name='GMM_Analysis_Results', index_col=0)
+        if run_name in old_df.columns:
+            # Add a suffix to avoid column name conflict
+            suffix_num = 1
+            while f"{run_name}_{suffix_num}" in old_df.columns:
+                suffix_num += 1
+            run_name = f"{run_name}_{suffix_num}"
+            new_df.columns = [run_name]
+        merged_df = old_df.join(new_df, how='outer')
+        with pd.ExcelWriter(filename, mode='w', engine='openpyxl') as writer:
+            merged_df.to_excel(writer, sheet_name='GMM_Analysis_Results')
 
+
+# ======================================
+#            Main Execution
+# ======================================
 
 def main():
+
+    '''
+    1. loads structures from JSON
+    2. Builds graphs via pymatgen + CrystalNN
+    3. Import Pettifor numbers
+    4. Computes FGW distance matrix, normalise, and saves to Excel
+    5. Histogram + normal distribution fit 
+    6. Check normal fit (KS test), if normal fit is poor, do BIC-based GMM
+    7. GMM histogram
+    8. Save GMM results to Excel'
+    9. Run t-SNE on the normalised FGW distances for 2D visualisation'
+    '''
+   
+    # --------  1. Load data -------- 
+    
     with open('/Users/y.h.jollin/FGW/MPtrj_1K_structures.json', 'r') as f:
         data = json.load(f)
     print("Number of entries in JSON:", len(data))
 
-    data = data[:200]
+    data = data[:400]
 
     structures = []
     for entry in tqdm(data):
@@ -143,7 +164,7 @@ def main():
             continue
     print(f"Successfully loaded {len(structures)} structures")
 
-    data = data[:500]
+    # -------- 2. Build graphs --------
     
     struct_graphs = []
     for structure in tqdm(structures):
@@ -155,16 +176,14 @@ def main():
             print(f"Error creating graph: {e}")
             continue
     
-    # Import Pettifor Numbers
+    # -------- 3. Import Pettifor numbers --------
+    
     global petti_num
     petti_num = pd.read_json('/Users/y.h.jollin/FGW/mod_petti.json', typ='series')
-    #print("Pettifor numbers loaded. Series length:", len(petti_num))
-    #print("Sample of pettifor_num", petti_num.head())
 
     # Generate Pettifor feature vectors for Fabinni data from the intitial graphical representations
     dicts = []
     dicts = [graph2dict(g, label='petti') for g in struct_graphs]
-    #print("Created dicts from struct_graphs. Length of dicts:", len(dicts))
     
     if len(dicts) > 0:
         print("Sample dict keys:", dicts[0].keys())
@@ -172,14 +191,14 @@ def main():
         print("Number of edges in first dict:", len(dicts[0]["edges"]))
     
     graphs = [dict2graph(d, label='petti') for d in dicts]
-    #print("Converted dicts to Graph objects. Length of graphs:", len(graphs))
     if len(graphs) > 0:
         first_graph = graphs[0]
         print("First graph has", len(graphs[0].nodes()), "nodes.")
     else:
         print("No graphs found:(")
 
-    # Generate fused GW matrix :)
+    # -------- 4. Compute FGW distance matrix --------
+
     fusedGW = getfusedvalue(graphs, alpha=0.5)
     #print("fusedGW matrix shape:", fusedGW.shape)
     if fusedGW.size > 0:
@@ -198,8 +217,6 @@ def main():
     # Convert to Dataframe 
     fusedGWDF = pd.DataFrame(fusedGW)
     fusedGWNormDF = pd.DataFrame(fusedGWNorm)
-    #print("fusedGWDF shape:", fusedGWDF.shape)
-    #print("fusedGWNormDF shape:", fusedGWNormDF.shape)
 
     # Get Excel 
     with pd.ExcelWriter('pettiFusedGW.xlsx', mode='w', engine="openpyxl") as writer:
@@ -207,12 +224,13 @@ def main():
         fusedGWNormDF.to_excel(writer, sheet_name="NormalisedFusedGW")
     print("Fused GW matrix saved to 'pettiFusedGW.xlsx")
 
-    # Get Diversity Matrix and Histogram 
-    import matplotlib.pyplot as plt
+    # -------- 5. Histogram + normal distribution fit --------
+    
     N = fusedGWNorm.shape[0]
     idx = np.triu_indices(N, k=1)
     pairwise_distances = fusedGWNorm[idx]
 
+    # Basic data
     median_d = np.median(pairwise_distances)
     min_d = np.min(pairwise_distances)
     max_d = np.max(pairwise_distances)
@@ -221,12 +239,13 @@ def main():
     print(" Min distance:", min_d)
     print(" Max distance:", max_d)
     
-    # Normal Fit 
+    # Mean + std
     mean = np.mean(pairwise_distances)
     std = np.std(pairwise_distances)
     print(f" Mean of distance: {mean:.4f}")
     print(f" Standard deviation of distance: {std:.4f}")
 
+    # Histogram with normal fit
     plt.figure(figsize=(6,4))
     count, bins, patches = plt.hist(
             pairwise_distances,
@@ -235,7 +254,7 @@ def main():
             color='orange',
             alpha=0.5,
             edgecolor='gray'
-         )
+        )
     xmin, xmax = bins[0], bins[-1]
     x = np.linspace(xmin, xmax, 200)
     normal_pdf = norm.pdf(x, loc=mean, scale=std)
@@ -243,13 +262,14 @@ def main():
 
     plt.title("Histogram of FGW Distances with Normal Fit")
     plt.xlabel("Normalised FGW Distance")
-    plt.ylabel("Number of Pairs")
-    print("Histogram has been saved in .png format")
+    plt.ylabel("Density")
+    plt.legend()
     plt.savefig("Histogram of FGW Distances with Normal Fit.png")
-
     plt.close()
+    print("Histogram (nomral fit) has been saved in .png format")
 
-    # Evaluate how well the normal distribution fits the data
+    # -------- 6. Check normal fit (KS test), if fit is poor do GMM --------
+    
     D, p_value = kstest(pairwise_distances, 'norm', args=(mean, std))
     print(f"K-S test statistic: {D:.3f}")
     print(f"K-S test p-value: {p_value:.3e}")
@@ -273,15 +293,19 @@ def main():
                 best_n = n
         print(f"Best number of components: {best_n}")
 
-        # Fit GMM with best_n 
+        # -------- 7. GMM histogram --------
+        
         gmm = GaussianMixture(n_components=best_n, covariance_type='full')
         gmm.fit(reshaped)
 
-        # Plot GMM
+         # Converged status, log likelihood score, weights, means, covars
+        converged_status = gmm.converged_
+        log_likelihood_score = gmm.lower_bound_
         weights = gmm.weights_
         means = gmm.means_.flatten()
         covars = gmm.covariances_.flatten()
-    
+
+        # Plot GMM
         plt.figure(figsize=(10,6))
         count, bins, patches = plt.hist(
             pairwise_distances,
@@ -324,21 +348,28 @@ def main():
         plt.close()
         print("GMM is fitted and saevd in .png format")
 
-    # Save GMM results to CSV
-    save_to_csv(
-        filename='gmm_analysis_results.csv',
-        ks_stat=D,
-        ks_pvalue=p_value,
-        gmm_best_n=best_n,
-        gmm_bic=lowest_bic,
-        weights=weights,
-        means=means,
-        covars=covars,
-        converged_status=converged_status,
-        log_likelihood_score=log_likelihood_score
+    # -------- 8. Save GMM results to Excel --------
+    
+    metrics_dict = {
+        "KS_Stat": D,
+        "p_value": p_value,
+        "GMM_BestN": best_n,
+        "GMM_BIC": lowest_bic,
+        "Converged_Status": converged_status,
+        "Log_Likelihood_Score": log_likelihood_score,
+        "GMM_Weights": ", ".join([f"{w:.4f}" for w in weights]),
+        "GMM_Means": ", ".join([f"{m:.4f}" for m in means]),
+        "GMM_Covars": ", ".join([f"{c:.4f}" for c in covars])
+    }
+    
+    save_side_by_side_excel(
+        filename='GMM_Analaysis_Results.xlsx',
+        run_name='50',
+        metrics_dict=metrics_dict
     )
-   
-    # Get t-SNE
+
+    # -------- 9. Run t-SNE --------
+    
     from sklearn.manifold import TSNE
     tsne = TSNE(
         n_components=2, 
